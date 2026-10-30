@@ -1,0 +1,876 @@
+# NexusSeasons configuration
+
+# In-game "why are you taking damage + what do you do about it" messaging -- fires the moment a
+# system in this plugin (currently: summer heatstroke, meteor shower impacts) starts actually
+# hurting a player, then reminds them again at most once per reminder-interval-seconds for as long
+# as the problem is still going, instead of repeating on every single damage tick. See
+# SeasonProblemAdvisor.
+messages:
+  enabled: true
+  reminder-interval-seconds: 30
+
+season:
+  # how many in-game days each season lasts. One in-game day = one full
+  # Minecraft day/night cycle (24000 ticks), same as vanilla.
+  days-per-season: 30
+  # the year and season this world starts on, the FIRST time this plugin
+  # ever runs (after that, the live value lives in season-state.yml and
+  # this is ignored -- edit that file, or use /nexusseasons setyear, to
+  # change it later)
+  starting-year: 356
+  starting-season: SPRING
+
+# Growth-tick multiplier per season. 1.0 = unchanged. Below 1.0 means a
+# natural crop-growth tick has a chance to be vetoed (net effect: slower
+# growth). Above 1.0 means a successful growth tick has a chance of an
+# extra growth stage on top (net effect: faster growth). Applies to any
+# block that fires BlockGrowEvent (crops, saplings, etc).
+plant-growth:
+  spring: 1.3
+  summer: 1.2
+  fall: 1.0
+  winter: 0.4
+
+# Natural mob spawn weight per season, per entity type (lowercase vanilla
+# name, e.g. "zombie", "skeleton", "spider"). 1.0 = unchanged. Below 1.0
+# thins that spawn out; above 1.0 has no additional effect on its own
+# (see WorldVisualManager/SeasonalMobSpawner docs) -- any mob/season
+# combination not listed here defaults to 1.0.
+mob-spawns:
+  winter:
+    zombie: 0.7
+  fall:
+    spider: 1.0
+
+# Override vanilla's day/night cycle with a fixed, even 12-hour-day /
+# 12-hour-night split stretched across real time, instead of vanilla's
+# ~24-real-hour full cycle. Only affects normal (overworld-type)
+# worlds -- the Nether and the End are untouched.
+# NOTE: this is read once at startup. Flipping "enabled" and running
+# /nexusseasons reload will NOT toggle it live -- restart the server.
+#
+# Defaults below give a full 24-real-hour day/night cycle (12h day + 12h
+# night, with vanilla's usual sunrise/sunset transition still happening
+# at the boundary between them, same as any Minecraft day). Change
+# day-length-minutes/night-length-minutes independently if you want a
+# different split or total length -- they don't have to match each other.
+day-night:
+  enabled: true
+  day-length-minutes: 720
+  night-length-minutes: 720
+
+# A second boss bar (separate from the season/year/day one below) showing a
+# live, second-by-second clock for the current day/night cycle, a named
+# phase of the day (Sunrise, Morning, Noon, Afternoon, an explicit nightfall
+# warning, Sunset, Night, Midnight, Late Night), and a fill that completes
+# once per full day/night cycle. It reads whatever world-time value
+# day-night above (or vanilla, if that's off) is already driving, so it's
+# accurate either way with nothing extra to hook up.
+# With the default day-night config (720 + 720 real minutes = a full
+# 24-real-hour cycle), the clock also advances at genuinely real-world pace
+# -- one real second is one displayed clock second.
+time-boss-bar:
+  enabled: true
+  # how often (real seconds) the clock/phase/fill actually refresh. 1 is the
+  # true "ticks forward like a real clock" feel; raise it if you'd rather
+  # trade that for fewer boss-bar packet updates.
+  refresh-interval-seconds: 1
+  # how many Minecraft ticks of daylight remain (1000 = 1 in-game hour) before
+  # the bar switches to its explicit nightfall warning phase, ahead of
+  # settling into the ordinary Sunset/Night phases -- a heads-up that
+  # monsters are about to start spawning, not just a label change.
+  nightfall-warning-lead-ticks: 1000
+
+# Same idea as day-night above, applied to weather: instead of leaving vanilla's own random
+# weather engine in charge and just protecting it from being disabled, NexusSeasons becomes the
+# sole authority over storm/thunder on its own real-time schedule. Picks a random duration for
+# the current state (clear, or rain with a chance of thunder), and re-asserts that state on every
+# managed world every tick -- this is what actually defeats a command (or command block) trying
+# to force a specific weather state, not just a gamerule protecting against it.
+# NOTE: also read once at startup, same as day-night.enabled above -- toggling this needs a restart.
+weather:
+  enabled: true
+  clear-min-minutes: 20
+  clear-max-minutes: 45
+  rain-min-minutes: 10
+  rain-max-minutes: 25
+  # chance a rain period also includes thunder, rolled fresh each time weather switches to rain
+  thunder-chance: 0.35
+
+# Continuously re-asserts the doDaylightCycle/doWeatherCycle gamerules this
+# plugin needs (checked every tick, so a wrong value is corrected within
+# about 50ms), and separately cancels the specific commands that would
+# disable them -- "/gamerule doDaylightCycle <value>"/"/gamerule
+# doWeatherCycle <value>" (a bare read with no value is still allowed),
+# "/time set"/"/time add", and "/weather clear|rain|thunder" -- before
+# they run, for players and console.
+#
+# NOTE: command blocks can't be intercepted before they run this way --
+# Bukkit/Paper has never exposed an event for that, for any plugin, not
+# just this one. A command block trying one of the above still gets
+# corrected within a tick by DayNightCycleManager/WeatherCycleManager
+# (when their respective *.enabled is on) reasserting their own state
+# every tick regardless of what changed it, and by the every-tick
+# gamerule re-assertion below for everything else -- just not prevented
+# outright the way a player or console command is.
+#
+# The only sanctioned way to turn any of this off is /nexusseasons
+# cyclelock off, which flips this value and saves it immediately (a live
+# toggle, not a config-edit-and-restart setting like day-night.enabled
+# above).
+cycle-lock:
+  enabled: true
+
+# Scheduled keep-inventory events -- at each time below, warns players in chat, counts down in
+# chat AND on their title screen, then forces the keepInventory gamerule ON the moment it starts.
+# The same warning/countdown/message sequence runs in reverse once the window's duration is up,
+# forcing it back OFF. "Forces" is deliberate: once enabled, this plugin re-asserts whatever the
+# schedule says EVERY TICK, so a /gamerule command from a player, the console, or a redstone
+# command block gets corrected within about a tick (~50ms) no matter where it came from -- see
+# KeepInventoryEventManager's class doc for the full explanation, including the one honest
+# limitation (a command block's own command can't be intercepted before it runs -- nothing in
+# Bukkit/Paper exposes that -- so the per-tick correction, not prevention, is what actually
+# protects this).
+#
+# All times are this SERVER's own local wall-clock time (whatever timezone the machine itself is
+# set to), 24-hour HH:mm, NOT an in-game/NexusSeasons day-night or season value -- "9:00 PM every
+# day" means the clock on the wall, every real day, regardless of what season or day/night phase
+# NexusSeasons currently has active.
+keep-inventory-events:
+  enabled: false
+
+  # Add as many entries as you want -- this is what makes it "multiple times a day" if that's
+  # what you want. Each one turns keepInventory ON at "start" and automatically OFF again
+  # "duration-minutes" later.
+  schedule:
+    - start: "18:00"
+      duration-minutes: 60
+    - start: "21:30"
+      duration-minutes: 30
+
+  # How much advance notice players get before a window starts/ends, in minutes.
+  warning-lead-minutes: 5
+  # How many seconds of chat + title-screen countdown lead directly into the moment it starts/ends.
+  countdown-seconds: 10
+
+  # Whether a player or console typing "/gamerule keepInventory <value>" gets blocked outright
+  # while this schedule is enabled -- a courtesy so the command visibly fails with an explanation
+  # instead of silently getting corrected back by the per-tick enforcement above a moment later.
+  # This can't cover a command block (see the class doc) -- the per-tick enforcement is what
+  # actually protects against that case regardless of this setting.
+  block-manual-changes: true
+
+  # {minutes}/{seconds} get substituted in automatically where used below. A blank/missing
+  # message silences just that one announcement -- there's no separate per-message enable toggle.
+  messages:
+    warning: "§e⚠ Keep Inventory turns §a§lON §e in {minutes} minute(s)!"
+    countdown: "§c§lKeep Inventory ON in {seconds}..."
+    start: "§a§lKeep Inventory is now ON! Die without fear."
+    start-title: "§a§lKEEP INVENTORY: ON"
+    start-subtitle: "§7Die without fear."
+    end-warning: "§e⚠ Keep Inventory turns §c§lOFF §e in {minutes} minute(s)! Play it safe."
+    end-countdown: "§c§lKeep Inventory OFF in {seconds}..."
+    end: "§c§lKeep Inventory is now OFF. Your items will drop on death again."
+    end-title: "§c§lKEEP INVENTORY: OFF"
+    end-subtitle: "§7Your items will drop again."
+
+visuals:
+  # real snow accumulation/melt on cold-biome surfaces during Winter --
+  # the one genuinely visible "the map changes" effect achievable without
+  # a resource pack.
+  snow-accumulation: true
+  # how many surface blocks to check per sweep, budgeted to avoid a lag spike
+  snow-blocks-per-tick: 64
+  # how often (seconds) the sweep runs
+  sweep-interval-seconds: 5
+
+ambiance:
+  # a big, unmissable banner announcement when a season actually changes
+  # (includes the "a new year begins" line automatically when applicable)
+  transition-enabled: true
+  # quieter, italicized "environmental dialogue" lines dropped periodically
+  # DURING a season, at a randomized delay between the two values below --
+  # a new random delay is picked after every line, so it never falls into
+  # a predictable rhythm the way a fixed timer would
+  enabled: true
+  min-interval-minutes: 8
+  max-interval-minutes: 20
+
+music:
+  # a real, looping seasonal soundtrack built entirely from vanilla music
+  # tracks (Sound.MUSIC_* -- no resource pack, no custom audio files).
+  # Played under SoundCategory.MUSIC, so it respects each player's own
+  # in-game Music volume slider, same as vanilla background music.
+  enabled: true
+  # how long (seconds) a track plays before switching to another random
+  # track from the current season's pool. Vanilla tracks vary in real
+  # length; this doesn't try to match each one exactly -- it's a fixed
+  # rotation interval, same approach as a radio station's block length.
+  track-length-seconds: 210
+
+# ============================================================================
+# "Crazy weather" -- particle/physics effects built entirely from plugin code,
+# no resource pack. Every section below is independently enable-able. Each
+# event (dry-thunder/fog/blizzard/tornado) can also occur naturally: every
+# check-interval-minutes, it rolls natural-chance (0.0-1.0) to start on its
+# own for a random duration between the min/max seconds -- set natural-chance
+# to 0 if you only ever want to trigger these by hand with /nexusseasons.
+# ============================================================================
+
+# Continuous ambient wind -- always running (not a start/stop event like the
+# others below). Direction and strength slowly drift, with a bigger re-roll
+# every change-interval-minutes.
+wind:
+  enabled: true
+  # 0.0-1.0 scale
+  min-strength: 0.05
+  max-strength: 0.5
+  change-interval-minutes: 10
+  # gently push players standing with open sky above them in the wind direction
+  push-players: true
+  # below this strength, players aren't pushed at all -- a light breeze shouldn't shove anyone
+  player-push-min-strength: 0.3
+  player-push-multiplier: 0.15
+  # how much a player's own carried inventory changes their push multiplier above -- a full
+  # inventory of gear genuinely feels different in the wind than an empty one:
+  #  - on the ground/swimming: extra weight anchors you, so a fuller inventory gets LESS push
+  #    (multiplier trends toward -full below as slots fill up) -- default is now deliberately
+  #    near-zero, so a genuinely well-stocked player barely gets pushed at all
+  #  - gliding on an elytra: extra weight destabilizes you instead, so a fuller inventory gets
+  #    MORE push -- a heavily-loaded glider has a much harder time holding a straight line than
+  #    someone flying empty-handed
+  # Both curves blend between the -empty and -full values based on how many of the 36 main
+  # inventory slots are occupied (armor/offhand don't count -- this is about what you're
+  # carrying, not wearing), reshaped by fullness-curve below so a player doesn't need every
+  # single slot literally full to get real protection -- see that key's own comment for why.
+  # Set enabled: false to go back to the old flat push for everyone.
+  inventory-weight:
+    enabled: true
+    ground-push-multiplier-empty: 1.5
+    # near-zero on purpose -- "shouldn't be pushed by the wind easily, if at all" once loaded up
+    ground-push-multiplier-full: 0.05
+    glide-push-multiplier-empty: 0.4
+    glide-push-multiplier-full: 1.8
+    # under 1.0 makes fullness count as "close to full" well before every one of the 36 slots is
+    # actually occupied -- without this, only a LITERALLY maxed-out inventory got real wind
+    # resistance, and in practice almost nobody keeps every single slot full (people leave room
+    # for pickups), so most "my inventory is full" players were only getting a small fraction of
+    # the intended protection. At 0.4, being 70% full already counts as ~87% full for this purpose.
+    fullness-curve: 0.4
+  # once wind strength crosses this, it's strong enough to start tearing loose blocks free
+  severe-threshold: 0.7
+  # per-tick chance of blowing away one eligible block once severe-threshold is crossed
+  dislodge-chance-per-tick: 0.02
+  # how far around a random online player to search for something to dislodge
+  dislodge-search-radius: 12
+  # block types that count as "sits by itself, isn't heavily supported" -- leave empty to use the
+  # built-in default list (wool, fences, leaves, saplings, torches, ladders, scaffolding)
+  fragile-materials: []
+
+  # Short, sharper bursts layered on top of the steady drift above -- a gust can swing well off
+  # the current steady direction and briefly push harder, which is what actually gives the
+  # "pushed and pulled all over the place" feel; the slow drift alone just reads as wind slowly
+  # rotating over many minutes.
+  gust:
+    enabled: true
+    # how often (seconds) to roll whether a new gust starts
+    check-interval-seconds: 15
+    # chance on each roll that a gust actually starts
+    chance: 0.3
+    duration-min-seconds: 3
+    duration-max-seconds: 8
+    # how far off the steady wind direction a gust can swing, in degrees either side --
+    # 180 allows a near-total reversal, small values keep gusts closer to the prevailing direction
+    direction-swing-degrees: 120
+    # how much stronger than the current steady wind a gust gets (capped at 1.0 strength either way)
+    strength-multiplier: 1.8
+
+# Summer heat exhaustion: standing exposed under open sky (no roof/overhang above you -- same
+# "exposed" check wind uses) during Summer, without an active storm cooling things off, builds
+# heat up in stages, the same escalating-then-receding pattern as everything else in this "crazy
+# weather" layer. Stage 1: weakness. 2: + mining fatigue. 3: + hunger. max-stage (default 4): all
+# of the above plus a real chance of damage each second -- genuine heatstroke, not just an
+# inconvenience. Ducking into shade/indoors starts recovery immediately, same as the other
+# exposure-based systems. Give a player a Cooling Cap (/nexusseasons coolingcap give) to make them
+# fully immune while worn -- no heat buildup at all, exactly like Stormward Boots and wind.
+summer-heat:
+  enabled: true
+  exposure-seconds-per-stage: 30
+  recovery-seconds-per-stage: 20
+  max-stage: 4
+  # once at max-stage, this is the per-second chance of an actual damage tick (not guaranteed
+  # every single second at max stage, so it doesn't feel like a metronome)
+  damage-chance-per-second: 0.34
+  damage-amount: 1.0
+
+# Real lightning and thunder with NO rain -- the sky stays clear, this never touches world storm
+# state at all. Genuinely achieved through the real API (World#strikeLightningEffect, the
+# visual/audio-only variant -- no fire, no block damage, no entity damage).
+dry-thunder:
+  enabled: true
+  natural-chance: 0.15
+  check-interval-minutes: 20
+  duration-min-seconds: 60
+  duration-max-seconds: 180
+  # how often a strike happens while active
+  strike-min-interval-seconds: 5
+  strike-max-interval-seconds: 20
+  # how far from a random online player a strike can land
+  strike-radius: 40
+  play-sound: true
+
+# HONEST LIMIT: this is a dense particle haze around each player, not real render-distance fog --
+# there's no plugin-only way to actually shrink how far a client renders without a resource pack
+# or packet-level tricks (this server does have ProtocolLib installed, which COULD do real fog
+# packets, but that's real extra scope beyond this config-driven version). See FogManager's doc
+# comment for the full explanation.
+fog:
+  enabled: true
+  natural-chance: 0.15
+  check-interval-minutes: 25
+  duration-min-seconds: 60
+  duration-max-seconds: 240
+  # how far out from each player the haze particles spawn
+  radius: 6.0
+  # particles spawned per player per tick-pass -- higher is thicker fog but more particle load
+  density: 25
+  color-r: 220
+  color-g: 220
+  color-b: 225
+
+# Blowing-snow whiteout around each player -- works anywhere, not gated to snowy biomes, since
+# it's a localized effect rather than a change to the world/biome state.
+blizzard:
+  enabled: true
+  natural-chance: 0.1
+  check-interval-minutes: 25
+  duration-min-seconds: 90
+  duration-max-seconds: 300
+  radius: 8.0
+  density: 20
+  # forces wind.severe-threshold-level wind for the blizzard's duration -- a blizzard should feel
+  # windier than an ordinary day
+  force-wind: true
+  apply-slowness: true
+  # potion amplifier, 0 = Slowness I
+  slowness-amplifier: 0
+
+# Shared no-grief zone around each world's own spawn point -- every block-modifying system in this
+# "crazy weather" layer respects this: fragile-block destruction (wind/tornado/earthquake), coastal
+# flooding (shore-break/tsunami/hurricane), wave-train ridges, water leveling, and meteor
+# impacts/ignition all skip anything inside it. Doesn't affect purely visual/ambient effects (fog,
+# blizzard particles, potion effects, wind push) -- only things that would actually leave a lasting
+# change to the terrain. Defaults large (1000 chunks) since a real spawn city/build can sprawl a
+# long way -- tune this down once you've found the actual edge of what needs protecting.
+spawn-protection:
+  enabled: true
+  radius-chunks: 1000
+
+# A spinning particle-vortex funnel with REAL physics -- pulls, lifts, and spins players caught
+# inside it. Two separate block-related systems: destroy-fragile-blocks below rips up small
+# fragile decorations (same fragile-materials list as wind.*) into dropped items with an outward
+# kick, while debris.* below that spawns real flying/spiraling BLOCK entities picked up from
+# natural terrain (a different, much more visually prominent effect -- see debris.materials).
+# Only one tornado runs at a time. "Leaf debris" in the particle rings is tinted dust, not a
+# literal leaf particle -- see TornadoManager's doc comment.
+tornado:
+  enabled: true
+  natural-chance: 0.05
+  check-interval-minutes: 30
+  duration-min-seconds: 30
+  duration-max-seconds: 90
+  # forces a REAL vanilla thunderstorm (genuine dark sky, not a particle effect) on the tornado's
+  # world for as long as it's active -- automatically reverts to the normal weather cycle
+  # (weather.* below) the instant the tornado ends. Requires weather.enabled to be true; with the
+  # custom weather cycle off, there's no normal cycle to hand control back to, so this does nothing.
+  darken-sky-during-storm: true
+  # horizontal radius of the funnel -- widened substantially so there's real room for the thick
+  # cobweb wall/halo/canopy below to actually spread out across
+  radius: 11.0
+  # how tall the funnel is, in blocks
+  height: 30
+  # how fast the whole tornado drifts across the terrain, in blocks/tick
+  move-speed: 0.15
+  # how fast the funnel visually spins
+  spin-speed: 0.45
+  # physics strength toward the center
+  pull-strength: 0.35
+  # physics strength upward, near the center
+  lift-strength: 0.3
+  # physics strength spinning a caught player around the vortex
+  swirl-strength: 0.4
+  # hard cap on how much velocity gets added to a player in one tick, regardless of the above
+  max-velocity-per-tick: 1.2
+  destroy-fragile-blocks: true
+  # budgeted fragile-block removals per tick while a tornado is active -- kept low on purpose,
+  # same throttling idea as NexusSeasons' own snow-accumulation sweep
+  blocks-per-tick: 2
+  # extra dense white-smoke/cloud "body fill" particles scattered inside the funnel every tick, on
+  # top of the spinning ring structure above -- the same dense-scatter technique fog/blizzard use
+  # for their whiteout look, applied here to turn the funnel into a thick, solid-looking cyclone
+  # body instead of a sparse wireframe outline. Each one gets real outward-swirling velocity, not
+  # just random jitter, so the density itself visibly spirals. Raised well past the original
+  # default here for a genuinely cloudy, dense look -- lower (or 0 to disable) if it's too
+  # particle-heavy for your server/players.
+  funnel-fill-density: 150
+  # how many particles make up each ring of the funnel structure -- higher reads as a fuller,
+  # less see-through circle
+  ring-point-count: 20
+  # blocks between each ring, vertically -- lower stacks more rings closer together for a denser funnel
+  ring-vertical-step: 1
+  # the funnel's actual SHAPE: a fraction of radius (above) at the base and at the top. Base stays
+  # small for a genuinely pointed touchdown point; top is deliberately ABOVE 1.0 so it visibly
+  # opens up wider than the base, like a real funnel cloud -- not narrow at both ends.
+  base-radius-ratio: 0.15
+  top-radius-ratio: 1.6
+  # exponent controlling how quickly it widens from base to top -- under 1.0 keeps it narrow for a
+  # good stretch near the base before flaring out, rather than a straight linear taper the whole way up
+  funnel-flare-curve: 0.65
+
+  # OFF by default -- the original particle-based funnel rings + dense-fill body. The cobweb
+  # funnel below is the default way the trunk itself gets drawn now; turn this back on to layer
+  # both together, or to go back to the original all-particle look entirely.
+  funnel-particles-enabled: false
+
+  # The funnel's actual trunk as REAL COBWEB BLOCKS instead of particles -- solid, textured,
+  # persistent geometry rather than a haze of dots. Placed following the same funnel shape
+  # (base-radius-ratio/top-radius-ratio/funnel-flare-curve above) as everything else, and always
+  # restored to whatever was there before once a block's no longer part of the shape or the
+  # tornado ends -- never leaves permanent cobwebs behind. IMPORTANT tradeoff: real blocks are far
+  # more expensive to place/remove than particles, so this only recomputes its rotated shape every
+  # update-interval-ticks below (a few times a second) rather than every tick -- it spins in small
+  # steps rather than the perfectly smooth motion particles give for free.
+  # IMPORTANT, worth reading before turning any of this up further: wall-thickness x
+  # ring-point-count x number-of-rings x update frequency all multiply together. This section as
+  # configured below is already a genuinely large amount of real block edits every rebuild cycle --
+  # watch your server's TPS the first time a tornado spawns after changing any of this, and pull
+  # back wall-thickness, ring-point-count, or body-halo.points-per-ring (in roughly that order)
+  # first if it struggles, or raise update-interval-ticks so it recomputes less often.
+  cobweb-funnel:
+    enabled: true
+    # how often (ticks) the shape recomputes -- lower = smoother spin but more block updates
+    update-interval-ticks: 4
+    # cobweb points per ring -- kept lower than the particle ring's own count since a real block
+    # reads as far more "solid" per-point than a particle does. Raised alongside radius above so
+    # point spacing around the now-wider circumference doesn't get sparser/gappier.
+    ring-point-count: 18
+    # blocks between rings, vertically -- kept sparser than the particle ring for the same reason
+    vertical-step: 2
+    # how many concentric rings deep the funnel wall is, stepping inward from its own outer
+    # surface -- 1 = a single-block-wide shell, higher genuinely thickens the tube.
+    wall-thickness: 9
+    # hard cap on how many NEW cobweb blocks get placed in one rebuild cycle -- a big shape change
+    # (e.g. the moment a tornado spawns) fills in progressively over a few cycles instead of one
+    # large burst of block edits. Raised to keep pace with the much larger total block count now.
+    max-blocks-per-update: 500
+    # a sparse cobweb HALO surrounding the ENTIRE funnel's outer surface at every height level --
+    # not just the top canopy disc -- so cobwebs visibly wrap around the whole cyclone body, not
+    # just the solid wall and the top. Spins at its own rate (spin-multiplier) so it visibly
+    # drifts relative to the solid wall underneath rather than looking glued to it.
+    body-halo:
+      enabled: true
+      points-per-ring: 12
+      offset: 3.0
+      spin-multiplier: 1.3
+    # real cobweb blocks scattered through the particle cloud canopy's own log-spiral shape (see
+    # canopy.* below) -- now the DOMINANT visual element up there, not a light accent. canopy.density
+    # (the particle count) was lowered to match -- particles are a supporting dusting now, cobwebs
+    # are doing most of the visual work in the sky.
+    canopy-accents:
+      enabled: true
+      count: 180
+
+  # A wide, spiraling cloud disc near the top of the funnel -- the rotating storm-cloud ceiling
+  # (mesocyclone) a real tornado actually descends from, much wider than the funnel column itself.
+  # Without this the funnel reads as a narrow column standing alone; this is what makes it read as
+  # a whole rotating storm system overhead instead.
+  canopy:
+    enabled: true
+    # how many times wider than radius (above) the canopy disc reaches -- deliberately large so it
+    # reads as a genuinely separate, broad cloud ceiling rather than just a wider funnel
+    radius-multiplier: 5.0
+    # spiral arms making up the disc -- more arms fills it in more evenly, fewer reads as more
+    # distinctly spiral
+    arms: 4
+    # particles spawned for the canopy every tick -- lowered now that cobweb-funnel.canopy-accents
+    # above is the dominant visual up there; this is just a light dusting of particles mixed in
+    # with the cobwebs, not the main event anymore
+    density: 30
+
+  # REAL flying blocks, not particles -- actual FallingBlock entities picked up from the natural
+  # terrain within the funnel's radius and set spiraling upward around it. Non-destructive by
+  # default: once one block's short lifetime is up, the original gets put back where it was
+  # picked up from, same as every other effect in this layer.
+  debris:
+    enabled: true
+    # ONLY natural/world-generated terrain by default -- grass, dirt, sand, gravel, logs, leaves,
+    # stone, snow. Deliberately NOT the same list as wind.fragile-materials above, which includes
+    # wool/fences/torches (things players build with). IMPORTANT: vanilla Bukkit has no reliable
+    # way to know whether an already-placed block was put there by a player or by world
+    # generation -- this is a material-type allowlist, not a real guarantee. A player-built dirt
+    # or log structure made of these same materials could still get picked up; trim this list in
+    # that case. Leave empty to use the built-in default list.
+    materials: []
+    # chance, each tick a tornado is active, of trying to pick up one more block -- kept high on
+    # purpose for "lots of blocks in the sky"
+    spawn-chance-per-tick: 0.5
+    # hard cap on how many debris blocks can be spiraling at once
+    max-active: 70
+    # how long (ticks) one block spirals before it's removed -- long enough by default for
+    # several full rotations (not just one pass) AND enough time to climb toward cloud height (see
+    # cloud-height-fraction below) before its lifetime is up. 220 = ~11 real seconds.
+    lifetime-ticks: 220
+    # upward speed EARLY in a block's flight -- tapers off automatically as it nears
+    # cloud-height-fraction below rather than climbing at this rate for the whole lifetime, so it
+    # settles into orbiting near the top instead of blasting straight through the canopy
+    swirl-speed: 0.5
+    lift-speed: 0.15
+    # how close to the very top of the funnel (as a fraction of tornado.height) a block's climb
+    # tapers toward and settles at -- kept just under 1.0 so it visibly reaches up near the cloud
+    # canopy without climbing past the funnel's own height entirely
+    cloud-height-fraction: 0.9
+    # put the original block back once its debris lifetime ends? true = never leaves lasting
+    # terrain damage even from a tornado that's triggered over and over; false = the pickup is permanent
+    restore-terrain: true
+
+# A localized tremor around every online player -- real small rapid velocity jitters (a
+# screen-shake stand-in), ground-crumble particles pulled from whatever block is actually beneath
+# each player, a low rumble sound, and a chance of shaking loose nearby fragile blocks (same
+# fragile-materials list wind/tornado use). Ramps in over the first ~2 seconds and fades out over
+# the last ~2 rather than snapping on/off. Has a real chance of a smaller AFTERSHOCK a while after
+# the main quake ends.
+earthquake:
+  enabled: true
+  natural-chance: 0.05
+  check-interval-minutes: 30
+  duration-min-seconds: 15
+  duration-max-seconds: 40
+  # chance, each tick while active, of a tremor pulse (shake/particles/sound/dislodge roll) --
+  # scaled by the ramp in/out envelope, so pulses are rarer right as a quake starts or ends
+  pulse-chance-per-tick: 0.15
+  # magnitude of the small random velocity jitter applied on each pulse
+  shake-strength: 0.12
+  # how far around each online player the quake's ground-crumble/dislodge search reaches
+  radius: 24.0
+  destroy-fragile-blocks: true
+  dislodge-chance-per-tick: 0.03
+  aftershock-chance: 0.4
+  aftershock-delay-min-seconds: 20
+  aftershock-delay-max-seconds: 60
+  # how much weaker (0.0-1.0) an aftershock is compared to the quake that triggered it
+  aftershock-magnitude-multiplier: 0.5
+
+# BlizzardManager's structural twin, sand instead of snow -- works anywhere (not gated to desert
+# biomes), same idea as blizzard/fog. No dedicated vanilla "blowing sand" particle exists, so the
+# haze itself is tinted DUST particles blown sideways in the wind direction, mixed with real
+# FALLING_DUST carrying actual sand block data for grit texture. Applies Blindness on top of
+# Slowness (blizzard only applies Slowness), and can force wind severity up for its duration.
+sandstorm:
+  enabled: true
+  natural-chance: 0.05
+  check-interval-minutes: 30
+  duration-min-seconds: 45
+  duration-max-seconds: 120
+  radius: 6.0
+  density: 40
+  apply-blindness: true
+  apply-slowness: true
+  slowness-amplifier: 1
+  force-wind: true
+
+# Periodic falling meteors -- animated manually tick-by-tick (not a real Fireball entity), each
+# starting high above a target point near a random online player and descending with a
+# FLAME/LARGE_SMOKE/LAVA trail, then bursting into a particle impact with a real explosion sound.
+# Non-destructive by default: impact is visual-and-sound only unless damage-enabled is on (real
+# knockback/damage via a never-block-breaking explosion), and ignite-target (off by default)
+# always reverts the fire it sets after a few seconds rather than leaving it behind.
+meteor-shower:
+  enabled: true
+  natural-chance: 0.03
+  check-interval-minutes: 45
+  duration-min-seconds: 30
+  duration-max-seconds: 60
+  # real ticks between one meteor launching and the next while a shower is active
+  meteor-interval-ticks: 40
+  # blocks above the target a meteor starts falling from
+  fall-height: 40
+  # how many ticks the descent takes -- lower is a faster, more violent-looking fall
+  fall-ticks: 30
+  # how far from a random online player a meteor's target point can land
+  impact-radius: 40
+  explosion-power: 1.5
+  damage-enabled: true
+  ignite-target: false
+
+# Continuous ambient ocean swell -- always running near open ocean (not a start/stop event).
+# Amplitude and frequency both scale with wind.* strength, so calmer wind gives small gentle
+# waves and stronger wind gives bigger, rougher ones -- "different types of waves" comes from
+# that connection rather than separate named wave presets.
+waves:
+  enabled: true
+  base-amplitude: 0.15
+  wind-amplitude-multiplier: 0.6
+  base-frequency: 0.02
+  wind-frequency-multiplier: 0.03
+  push-swimmers: true
+  # below this wind strength, swimmers aren't pushed by the current at all
+  push-min-wind-strength: 0.3
+  push-multiplier: 0.1
+
+  # Shared water-body detection, used by both the ambient waves above and shore-break below. Works
+  # on ANY body of water this size or larger -- lakes and ponds count exactly like the ocean does,
+  # at whatever height that water's own surface actually sits (not hardcoded to sea level).
+  min-body-size: 40
+  # hard cap on how many blocks the flood-fill size check will visit before giving up on a body
+  # that never reaches min-body-size -- bounds worst-case cost for oddly-shaped small ponds
+  body-detection-max-blocks: 4000
+  # small radius used to cheaply rule out "not near any water at all" before ever attempting the
+  # much more expensive flood-fill size check
+  water-search-radius: 5
+  # how long (seconds) a player's "am I in a big enough body of water" result is cached before
+  # being rechecked -- the flood-fill is too expensive to run on every tick for every player
+  eligibility-cache-seconds: 8
+
+  # Runs automatically the moment a shore-break wave, tsunami, or hurricane storm surge fully
+  # finishes at a spot -- fills in any low patches of water nearby to match that area's own normal
+  # (most-common) surface height, and NEVER raises anything past that height. This is for
+  # pre-existing multi-level water glitches sitting wherever a wave happens to pass through (a
+  # world-gen/build quirk, not something this plugin's own waves cause) -- it smooths them out on
+  # its own over time as waves naturally sweep past, no manual cleanup needed.
+  water-leveling:
+    enabled: true
+    # how far around a finished wave's coastline spot to scan/level -- kept modest since this runs
+    # synchronously on the main thread
+    radius: 24
+    # hard cap on how many blocks one leveling pass will place -- any unevenness left over past
+    # this budget just gets caught by the next wave that passes through the same spot
+    max-blocks-per-pass: 300
+
+  # REAL, continuous, recurring waves that crash onto the shore and wash back out -- built on the
+  # exact same "advance inland then recede, remembering and restoring every block it floods" real
+  # water engine tsunami/hurricane storm-surge use, just run in small frequent bursts instead of
+  # one huge one. Pushes players AND boats caught in them -- a boat gets extra upward lift so it
+  # visibly rides up over the wave rather than just getting shoved through it. Height scales with
+  # wind.* strength between min-height and max-height, so calm days get small lapping waves and
+  # rough/stormy wind gets the full-height waves crashing inland.
+  shore-break:
+    enabled: true
+    # how often (seconds) to check whether a new wave should start somewhere
+    check-interval-seconds: 6
+    # how many shore-break waves can be actively crashing/receding at once, across the whole server
+    max-concurrent: 3
+    coast-search-radius: 60
+    min-height: 1.0
+    max-height: 10.0
+    # how far inland one wave reaches at most
+    max-inland-distance: 14.0
+    # blocks/tick the front advances -- deliberately slow (much slower than tsunami/hurricane use)
+    # so a wave actually reads as visibly moving in over a couple of seconds, rather than water
+    # just appearing almost instantly
+    advance-speed: 0.35
+    # width (in blocks) of one wave's leading edge
+    front-width: 24.0
+    knockback-strength: 0.9
+    # hard cap on how many blocks one shore-break wave will remember/flood
+    max-affected-blocks: 800
+    # how long (seconds) the drain-back-out phase visibly takes, regardless of how many blocks
+    # actually got flooded -- a fixed, predictable pace rather than draining almost instantly for
+    # a small flood and only looking deliberate on a large one
+    recede-duration-seconds: 4
+    # how long (seconds), after a wave fully finishes, that same spot stays off-limits to a new
+    # one -- the real "goes back to normal and stays calm for a while" gap between waves
+    cooldown-seconds: 20
+    # how far apart (blocks) two waves -- or a new wave and a spot still on cooldown -- have to be
+    spacing-radius: 80
+
+  # REAL, continuously scrolling rows of raised water -- a genuine wave TRAIN moving across the
+  # open surface of any qualifying body of water, separate from shore-break above (which is one
+  # wave flooding onto land near the shore, then draining out). A periodic pattern -- a ridge of
+  # raised water blocks, then a gap of flat water, then the next ridge -- that scrolls
+  # continuously in the current wind direction. Runs per-player around anyone standing at/in a
+  # qualifying body. Deliberately does NOT run anywhere a tsunami or hurricane surge is currently
+  # active, so those stay one massive single wave rather than a field of smaller rolling swell.
+  wave-train:
+    enabled: true
+    # how often (real ticks) the pattern recomputes -- travel speed (below) is independent of this
+    tick-interval: 2
+    # how many blocks wide (along the direction of travel) one ridge is
+    ridge-width: 3
+    # how many blocks of flat water separate one ridge from the next
+    gap-width: 5
+    min-height: 1
+    max-height: 2
+    # blocks/real-tick the whole pattern travels -- deliberately slow so it reads as rolling
+    # swell, not a flicker
+    speed: 0.15
+    # how wide (blocks, perpendicular to travel) the visible field is around each player
+    span: 24
+    # how far (blocks, ahead of and behind the player along the travel direction) it extends
+    reach: 20
+    # hard cap on how many columns get touched per player per pass
+    blocks-per-tick: 150
+    # self-healing safety net: periodically clears any water sitting above the real water
+    # surface anywhere near an online player -- automatic version of /nexusseasons wavereset,
+    # catching leaked/stuck raised water on its own instead of needing an admin to notice and run
+    # the command by hand. Deliberately lighter than the manual command (only clears genuinely
+    # untracked excess, doesn't force-reset every active wave train server-wide), so it shouldn't
+    # be visible/disruptive when nothing's actually wrong.
+    auto-cleanup:
+      enabled: true
+      interval-minutes: 5
+      # kept smaller than wavereset's own default radius since this runs on a recurring schedule
+      # near every online player rather than once on demand -- raise it if leaks are still
+      # showing up outside this range between sweeps
+      radius: 24
+
+# A single dramatic coastal surge, built on the same "advance inland then recede, remembering and
+# restoring every block it temporarily floods" engine hurricane storm-surge uses. Real warning
+# (message + sound) before it actually hits.
+tsunami:
+  enabled: true
+  natural-chance: 0.02
+  check-interval-minutes: 45
+  # how far out to search for a coastline near the trigger point
+  coast-search-radius: 60
+  warning-seconds: 15
+  max-inland-distance: 40.0
+  # blocks/tick the front advances
+  advance-speed: 1.2
+  # width (in blocks) of the wave's leading edge
+  front-width: 40.0
+  # how many blocks above sea level it floods up to
+  wave-height: 6.0
+  knockback-strength: 1.4
+  # hard cap on how many blocks one tsunami will remember/flood -- protects performance and memory on a very large surge
+  max-affected-blocks: 6000
+
+# An orchestrated event, not a new effect of its own -- ramps wind.* up to a real severe level,
+# forces REAL vanilla rain/thunder (genuine weather, not a particle simulation) once intensity
+# crosses rain-threshold/thunder-threshold, optionally dips into a calm "eye" partway through, then
+# weakens back to nothing. Periodically pulses a gentler, sustained version of the tsunami surge
+# above near any coastline it can find.
+hurricane:
+  enabled: true
+  natural-chance: 0.03
+  check-interval-minutes: 60
+  duration-min-minutes: 15
+  duration-max-minutes: 40
+  # fraction of the storm's total duration spent ramping up at the start / down at the end
+  ramp-fraction: 0.15
+  eye-enabled: true
+  # fraction of the storm's total duration the calm eye occupies, centered on the midpoint
+  eye-width-fraction: 0.1
+  # intensity (0.0-1.0) at the dead center of the eye -- not fully zero, real hurricane eyes are unnervingly calm but not silent
+  eye-intensity: 0.1
+  # wind.* strength floor once the storm is active at all, even at low intensity
+  min-wind-strength: 0.6
+  # intensity (0.0-1.0) needed before it actually starts raining
+  rain-threshold: 0.25
+  # intensity (0.0-1.0) needed before thunder becomes possible
+  thunder-threshold: 0.6
+  # re-rolled roughly every 5 seconds while thunder-eligible (not literally every tick, so it
+  # holds for a real stretch instead of flickering) -- chance each roll that thunder is on
+  # until the next roll
+  thunder-chance-per-tick: 0.02
+  storm-surge-enabled: true
+  # how often (seconds) to attempt a new storm-surge pulse while the storm is intense enough
+  surge-interval-seconds: 45
+  surge-coast-search-radius: 60
+  # storm surge is deliberately much gentler/shorter-ranged than a full tsunami
+  surge-max-inland-distance: 15.0
+  surge-advance-speed: 0.6
+  surge-front-width: 30.0
+  surge-wave-height: 3.0
+  surge-knockback-strength: 0.6
+  surge-max-affected-blocks: 1500
+
+# A persistent scoreboard sidebar (upper-right corner) showing the current headline weather and a
+# live wind meter. HONEST LIMIT: this is the actual closest real placement to a screen corner --
+# there's no plugin API for true arbitrary HUD positioning without a resource pack or client mod.
+# Turn this off if another plugin on the server also uses player scoreboards for its own sidebar
+# (only one can show at a time -- a normal Bukkit limit, not specific to this).
+weather-hud:
+  enabled: true
+  refresh-interval-seconds: 3
+  # Paper can hide the red score numbers down the right of the sidebar. Ignored on servers that can't.
+  hide-score-numbers: true
+  # Which lines show. Sky is always on. Turn lines off if the sidebar is too busy for you.
+  show:
+    temperature: true     # with a "feels like" when wind chill or heat index makes a real difference
+    humidity: true
+    dew-point: true
+    wind: true            # now in mph (or km/h with climate.units: C), plus the compass arrow
+    pollen: true          # the main pollen of the day; a warning mark if it matches YOUR allergy
+    uv-index: true
+  # A little jab at our European friends: one line of banter, and right under it the temperature in
+  # Celsius no matter what climate.units says. Turn it off, or swap the text for your own joke.
+  euro-corner:
+    enabled: true
+    text: "AC? Just open a window."
+
+# The climate behind the sidebar and the 7:00 AM forecast. Temperature follows the seasons (coldest
+# mid-winter, warmest mid-summer), wanders through multi-day warm and cool spells, swings between a
+# 5 AM low and a 3 PM high, drops when it rains, and shifts with the biome you are standing in
+# (deserts run hot and dry, snowy biomes cold). Humidity, dew point, UV and pollen follow from it.
+# Values are in Fahrenheit here; `units: C` only changes what players SEE.
+climate:
+  enabled: true
+  units: F                    # F or C (C also switches mph to km/h)
+  annual-mean-f: 54           # the average over a whole year
+  annual-swing-f: 26          # mid-summer is mean + swing (80F), mid-winter is mean - swing (28F)
+  spell-swing-f: 6            # how far a multi-day warm or cold spell can push the day
+  daily-range-clear-f: 20     # low-to-high swing on a clear day
+  daily-range-cloudy-f: 11    # ...and on a cloudy one
+  rain-cooling-f: 5           # rain makes it this much cooler
+  thunder-cooling-f: 8
+  blizzard-cooling-f: 24
+  fog-cooling-f: 2
+  seed: 0                     # 0 = use the world seed, so each world has its own weather personality
+
+# The daily weather report. It is issued when the in-game clock hits `hour-tick` (1000 = 7:00 AM;
+# tick 0 is 6:00 AM and every 1000 ticks is an hour), once per in-game day. With the default
+# 24-real-hour day that is once per real day. The precipitation part is NOT a guess: it is read
+# from the schedule of rain that WeatherCycleManager has already rolled and will play back. (If
+# weather.enabled is off, vanilla weather runs and the report says precipitation can't be called.)
+forecast:
+  enabled: true
+  broadcast: true             # send it to everyone online (players can /forecast mute)
+  hour-tick: 1000
+  catch-up-window-ticks: 3000 # still issue it if the server was off at 7:00, up to this late
+  world: ""                   # blank = the first overworld
+
+# Seasonal allergies. Each new player has a chance of being allergic to one family of pollen (tree,
+# grass, weed or mould). When their kind is HIGH outside and they are out in it they sneeze: a panda
+# sound and a chat line. Nothing else. /allergy shows it, and players can change it themselves.
+allergies:
+  enabled: true
+  chance-per-player: 0.3
+  sneezing: true
+  allow-self-set: true
+
+# A chat message the moment an event in this "crazy weather" layer starts or ends -- every
+# message below is plain, editable text, and a blank/missing one is how you silence that specific
+# announcement (no separate per-event enable toggle needed on top of the one master switch below).
+# Fires at the moment each event actually starts/ends, not as a multi-second advance countdown
+# before it arrives -- tsunamis already have their own genuine pending-warning countdown
+# separately from this (see TsunamiManager), unaffected by anything here.
+weather-announce:
+  enabled: true
+  messages:
+    thunderstorm-start: "§7Dark clouds gather on the horizon... §fa thunderstorm is rolling in."
+    thunderstorm-end: "§7The thunder fades into the distance."
+    fog-start: "§7A thick fog rolls in, swallowing the horizon."
+    fog-end: "§7The fog begins to lift."
+    blizzard-start: "§b§lA bitter wind picks up... §fa blizzard is moving in!"
+    blizzard-end: "§bThe blizzard finally breaks."
+    sandstorm-start: "§6§lA wall of dust rises on the horizon... §fa sandstorm approaches!"
+    sandstorm-end: "§6The sandstorm settles."
+    tornado-start: "§8§lThe sky churns violently... §c§la TORNADO has touched down!"
+    tornado-end: "§7The tornado has dissipated."
+    earthquake-start: "§4§lThe ground begins to shake violently!"
+    earthquake-aftershock: "§4A smaller aftershock rumbles through..."
+    earthquake-end: "§7The tremors have stopped."
+    meteor-shower-start: "§d§lStreaks of fire cut across the sky... §fa meteor shower has begun!"
+    meteor-shower-end: "§7The meteor shower has ended."
+    hurricane-start: "§9§lStorm warning: §fa hurricane is bearing down on the coast!"
+    hurricane-end: "§9The hurricane has passed."
